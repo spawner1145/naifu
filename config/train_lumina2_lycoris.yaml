@@ -1,0 +1,118 @@
+name: lumina2-lycoris-train
+target: modules.lumina2_model_train_lycoris.setup
+adaptive_loss_weight: True
+
+model: 
+  tokenizer_path: /mnt/public/Lumina-Image-2.0/tokenizer
+  text_encoder_path: /mnt/public/Lumina-Image-2.0/text_encoder
+  model_name: NextDiT_2B_GQA_patch2_Adaln_Refiner
+  qk_norm: True
+  resume: null
+  
+trainer:
+  auto_resume: false
+  init_from: /mnt/public/Lumina-Image-2.0
+  checkpointing: false
+  model_path: /mnt/public/Lumina-Image-2.0
+  batch_size: 2
+  seed: 19990326
+  wandb_id: "lumina2_lycoris_train"
+  use_xformers: false
+  accumulate_grad_batches: 8
+  grad_clip: 2
+  gradient_clip_val: 2
+  save_format: safetensors
+  checkpoint_dir: ./results/lumina2_lycoris
+  checkpoint_freq: 1
+  save_weights_only: true
+  max_epochs: 20
+  checkpoint_steps: 1000
+  max_steps: -1
+  resolution: 1024
+
+# LyCORIS配置
+lycoris:
+  # 算法选择: locon, loha, lokr, dylora, etc.
+  algo: locon
+  
+  # LoRA维度
+  linear_dim: 16
+  
+  # LoRA alpha (缩放因子)
+  linear_alpha: 8
+  
+  # 分解因子 (用于某些算法)
+  factor: 4
+  
+  # 乘数 (应用强度)
+  multiplier: 1.0
+  
+  # dropout率 (可选)
+  # dropout: 0.0
+  
+  # 秩dropout (可选)
+  # rank_dropout: 0.0
+  
+  # 模块dropout (可选)
+  # module_dropout: 0.0
+
+# 如果需要为不同模块使用不同配置（高级）
+# lycoris_model:
+#   algo: locon
+#   linear_dim: 32
+#   linear_alpha: 16
+# 
+# lycoris_text_encoder:
+#   algo: locon  
+#   linear_dim: 8
+#   linear_alpha: 4
+
+advanced:
+  snr_type: "lognorm"
+  no_shift: true
+  train_res: [1024]
+  use_ema: false
+  train_text_encoder: false  # 是否训练text encoder
+  text_encoder_lr: 5e-5
+  
+lightning:
+  accelerator: gpu
+  devices: 8
+  strategy: "deepspeed"
+  precision: bf16
+
+dataset:
+  name: data_loader.arrow_load_stream.TextImageArrowStream 
+  target_area: 1024*1024
+  index_file: "dataset/porcelain/jsons/porcelain_mt.json"
+  multireso: true
+  num_workers: 8
+  random_flip: false
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1e-4
+    weight_decay: 1e-2
+
+scheduler:
+  name: transformers.get_cosine_schedule_with_warmup
+  params:
+    num_warmup_steps: 1000
+    num_training_steps: 400000
+    num_cycles: 0.5
+    last_epoch: -1
+    
+sampling:
+  enabled: true
+  use_wandb: true
+  seed: 1234
+  height: 1024
+  width: 1024
+  every_n_steps: 1000
+  every_n_epochs: 1
+  save_dir: "samples/lumina2_lycoris"
+  prompts:
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1girl, solo, long hair, blonde hair, blue eyes, smile, looking at viewer, outdoors, sky, day, cloud, blue sky"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1boy, solo, short hair, brown hair, brown eyes, standing, forest, nature, sunlight"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> best quality, masterpiece, 1girl, cat ears, white hair, red eyes, sitting, indoor, window, soft light"

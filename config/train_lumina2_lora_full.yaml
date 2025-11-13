@@ -1,0 +1,304 @@
+# Lumina2 LoRA训练配置文件（完整版）
+# 本配置文件包含所有可配置参数及详细说明
+
+name: lumina2-lora-full-config
+target: modules.lumina2_model_train_lora.setup
+adaptive_loss_weight: True
+
+# ============================================================================
+# 模型配置
+# ============================================================================
+model: 
+  # tokenizer路径（本地路径或HuggingFace模型ID）
+  tokenizer_path: /mnt/public/Lumina-Image-2.0/tokenizer
+  
+  # text encoder路径
+  text_encoder_path: /mnt/public/Lumina-Image-2.0/text_encoder
+  
+  # 模型架构名称
+  # 可选: NextDiT_2B_GQA_patch2_Adaln_Refiner, NextDiT_2B_GQA_patch2, 等
+  model_name: NextDiT_2B_GQA_patch2_Adaln_Refiner
+  
+  # 是否使用QK normalization
+  qk_norm: True
+  
+  # 从检查点恢复训练（可选）
+  resume: null
+  
+  # VAE模型路径（可选，如果为null则使用model_path下的vae）
+  vae_path: null
+
+# ============================================================================
+# 训练器配置
+# ============================================================================
+trainer:
+  # 是否自动从最新检查点恢复
+  auto_resume: false
+  
+  # 初始化权重的路径（用于首次训练）
+  init_from: /mnt/public/Lumina-Image-2.0
+  
+  # 是否使用gradient checkpointing（节省显存）
+  checkpointing: false
+  
+  # 基础模型路径
+  model_path: /mnt/public/Lumina-Image-2.0
+  
+  # 训练批次大小
+  batch_size: 2
+  
+  # 随机种子
+  seed: 19990326
+  
+  # WandB项目ID（用于日志记录）
+  wandb_id: "lumina2_lora_train"
+  
+  # 是否使用xformers加速
+  use_xformers: false
+  
+  # 梯度累积批次数
+  accumulate_grad_batches: 8
+  
+  # 梯度裁剪阈值
+  grad_clip: 2
+  gradient_clip_val: 2
+  
+  # 保存格式: safetensors, original, ckpt
+  save_format: safetensors
+  
+  # 检查点保存目录
+  checkpoint_dir: ./results/lumina2_lora
+  
+  # 每N个epoch保存一次
+  checkpoint_freq: 1
+  
+  # 是否只保存权重（不保存优化器状态等）
+  save_weights_only: true
+  
+  # 最大训练轮数
+  max_epochs: 20
+  
+  # 每N步保存一次检查点（-1表示不按步数保存）
+  checkpoint_steps: 1000
+  
+  # 最大训练步数（-1表示不限制）
+  max_steps: -1
+  
+  # 训练分辨率
+  resolution: 1024
+
+# ============================================================================
+# LoRA配置（核心参数）
+# ============================================================================
+use_lora: true
+lora_params:
+  # LoRA秩（rank）
+  # 决定低秩矩阵的维度，越大表达能力越强但参数越多
+  # 推荐值: 4-64，常用: 8, 16, 32
+  r: 16
+  
+  # LoRA alpha参数
+  # 控制LoRA的缩放因子，通常设为与r相同或2倍
+  # 公式: scaling = lora_alpha / r
+  lora_alpha: 16
+  
+  # Dropout率
+  # 0.0表示不使用dropout，0.1-0.3可以帮助防止过拟合
+  lora_dropout: 0.0
+  
+  # 偏置训练策略
+  # "none": 不训练bias
+  # "all": 训练所有bias
+  # "lora_only": 只训练LoRA层的bias
+  bias: "none"
+  
+  # 目标模块列表
+  # Lumina2 的 NextDiT 注意力实现将 QKV 合并为同一个线性层，并使用 out 线性层输出
+  # 因此默认只需要为 "qkv" 和 "out" 注入 LoRA，如果需要扩展可自行添加
+  target_modules: 
+    - "qkv"      # 合并后的QKV投影
+    - "out"      # 注意力输出投影
+
+# ============================================================================
+# 高级训练配置
+# ============================================================================
+advanced:
+  # SNR类型: "uniform", "lognorm"
+  # uniform: 均匀采样时间步
+  # lognorm: 对数正态分布采样（推荐）
+  snr_type: "lognorm"
+  
+  # 是否禁用timestep shifting
+  no_shift: true
+  
+  # 训练分辨率列表（多分辨率训练）
+  train_res: [1024]
+  
+  # VAE编码批次大小（-1表示使用batch_size）
+  vae_encode_batch_size: -1
+  
+  # 是否使用EMA（Exponential Moving Average）
+  # LoRA训练通常不需要EMA
+  use_ema: false
+  
+  # 是否训练text encoder
+  # 通常不建议训练，除非有特殊需求
+  train_text_encoder: false
+  
+  # Text encoder学习率（如果训练）
+  text_encoder_lr: 5e-5
+  
+  # Latent均值和标准差（用于标准化）
+  # 如果不设置则使用默认值
+  latents_mean: null
+  latents_std: null
+
+# ============================================================================
+# Lightning框架配置
+# ============================================================================
+lightning:
+  # 加速器类型: gpu, cpu, tpu
+  accelerator: gpu
+  
+  # 使用的GPU数量（-1表示使用所有可用GPU）
+  devices: 8
+  
+  # 分布式策略
+  # "deepspeed": DeepSpeed ZeRO优化（推荐）
+  # "fsdp": PyTorch FSDP
+  # "ddp": 分布式数据并行
+  strategy: "deepspeed"
+  
+  # 精度设置
+  # "bf16": BFloat16（推荐，适用于Ampere及更新架构）
+  # "16": Float16
+  # "32": Float32
+  precision: bf16
+
+# ============================================================================
+# 数据集配置
+# ============================================================================
+dataset:
+  # 数据集类名
+  name: data_loader.arrow_load_stream.TextImageArrowStream
+  
+  # 目标区域大小（像素）
+  target_area: 1048576  # 1024*1024
+  
+  # 数据集索引文件路径
+  index_file: "dataset/porcelain/jsons/porcelain_mt.json"
+  
+  # 是否使用多分辨率训练
+  multireso: true
+  
+  # 数据加载器worker数量
+  num_workers: 8
+  
+  # 是否随机水平翻转
+  random_flip: false
+
+# ============================================================================
+# 优化器配置
+# ============================================================================
+optimizer:
+  # 优化器类名
+  name: torch.optim.AdamW
+  
+  # 优化器参数
+  params:
+    # 学习率
+    # LoRA可以使用比全量训练更高的学习率
+    # 推荐范围: 1e-4 到 5e-4
+    lr: 1e-4
+    
+    # 权重衰减（L2正则化）
+    weight_decay: 1e-2
+    
+    # Adam的beta参数（可选）
+    # betas: [0.9, 0.999]
+    
+    # epsilon参数（可选）
+    # eps: 1e-8
+
+# ============================================================================
+# 学习率调度器配置
+# ============================================================================
+scheduler:
+  # 调度器类名
+  name: transformers.get_cosine_schedule_with_warmup
+  
+  # 调度器参数
+  params:
+    # 预热步数
+    num_warmup_steps: 1000
+    
+    # 总训练步数
+    num_training_steps: 400000
+    
+    # cosine周期数
+    num_cycles: 0.5
+    
+    # 最后一个epoch的索引
+    last_epoch: -1
+
+# ============================================================================
+# 采样/验证配置
+# ============================================================================
+sampling:
+  # 是否启用采样
+  enabled: true
+  
+  # 是否使用wandb记录样本
+  use_wandb: true
+  
+  # 采样随机种子
+  seed: 1234
+  
+  # 生成图像高度
+  height: 1024
+  
+  # 生成图像宽度
+  width: 1024
+  
+  # 每N步生成一次样本
+  every_n_steps: 1000
+  
+  # 每N个epoch生成一次样本
+  every_n_epochs: 1
+  
+  # 样本保存目录
+  save_dir: "samples/lumina2_lora"
+  
+  # 测试提示词列表
+  prompts:
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1girl, solo, long hair, blonde hair, blue eyes, smile, looking at viewer, outdoors, sky, day, cloud, blue sky"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1boy, solo, short hair, brown hair, brown eyes, standing, forest, nature, sunlight"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> best quality, masterpiece, 1girl, cat ears, white hair, red eyes, sitting, indoor, window, soft light"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 2girls, friendship, holding hands, sunset, beach, happy, colorful"
+
+# ============================================================================
+# 性能调优建议
+# ============================================================================
+# 1. 显存不足时:
+#    - 减小 batch_size
+#    - 增大 accumulate_grad_batches
+#    - 启用 checkpointing: true
+#    - 减小 lora_params.r
+#
+# 2. 训练速度慢时:
+#    - 增大 batch_size
+#    - 减少 num_workers
+#    - 禁用 sampling.enabled
+#    - 使用 use_xformers: true
+#
+# 3. 过拟合时:
+#    - 增加 lora_params.lora_dropout (如0.1)
+#    - 降低 optimizer.params.lr
+#    - 增加 optimizer.params.weight_decay
+#    - 减小 lora_params.r
+#
+# 4. 欠拟合时:
+#    - 增大 lora_params.r
+#    - 增加 lora_params.lora_alpha
+#    - 增加 target_modules
+#    - 延长训练时间 (max_epochs或max_steps)

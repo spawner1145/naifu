@@ -1,0 +1,262 @@
+# Lumina2 LyCORIS训练配置文件（完整版）
+
+name: lumina2-lycoris-full-config
+target: modules.lumina2_model_train_lycoris.setup
+adaptive_loss_weight: True
+
+# ============================================================================
+# 模型配置
+# ============================================================================
+model: 
+  tokenizer_path: /mnt/public/Lumina-Image-2.0/tokenizer
+  text_encoder_path: /mnt/public/Lumina-Image-2.0/text_encoder
+  model_name: NextDiT_2B_GQA_patch2_Adaln_Refiner
+  qk_norm: True
+  resume: null
+  vae_path: null
+  
+# ============================================================================
+# 训练器配置
+# ============================================================================
+trainer:
+  auto_resume: false
+  init_from: /mnt/public/Lumina-Image-2.0
+  checkpointing: false
+  model_path: /mnt/public/Lumina-Image-2.0
+  batch_size: 2
+  seed: 19990326
+  wandb_id: "lumina2_lycoris_train"
+  use_xformers: false
+  accumulate_grad_batches: 8
+  grad_clip: 2
+  gradient_clip_val: 2
+  save_format: safetensors
+  checkpoint_dir: ./results/lumina2_lycoris
+  checkpoint_freq: 1
+  save_weights_only: true
+  max_epochs: 20
+  checkpoint_steps: 1000
+  max_steps: -1
+  resolution: 1024
+
+# ============================================================================
+# LyCORIS配置（核心参数）
+# ============================================================================
+lycoris:
+  # 算法选择
+  # - locon: LoRA for Convolution (推荐，适合视觉模型)
+  # - loha: LoRA with Hadamard Product (更高效)
+  # - lokr: LoRA with Kronecker Product (最高效)
+  # - dylora: Dynamic LoRA (动态秩)
+  # - full: 全量微调 (不推荐)
+  algo: locon
+  
+  # 线性层维度 (类似LoRA的rank)
+  # 推荐值: 4-32，常用: 8, 16
+  linear_dim: 16
+  
+  # 线性层alpha (缩放因子)
+  # 公式: scaling = linear_alpha / linear_dim
+  # 通常设为linear_dim的一半
+  linear_alpha: 8
+  
+  # 卷积层维度 (用于locon算法)
+  # 如果不设置，使用linear_dim
+  # conv_dim: 16
+  
+  # 卷积层alpha
+  # conv_alpha: 8
+  
+  # 分解因子 (用于lokr, loha等算法)
+  # 控制分解的秩，越小参数越少
+  factor: 4
+  
+  # 乘数/强度 (应用时的缩放)
+  # 1.0表示全强度应用
+  multiplier: 1.0
+  
+  # Dropout率 (防止过拟合)
+  # 0.0表示不使用dropout
+  # dropout: 0.0
+  
+  # 秩dropout (随机丢弃某些秩)
+  # rank_dropout: 0.0
+  
+  # 模块dropout (随机丢弃某些模块)
+  # module_dropout: 0.0
+  
+  # 使用标量权重
+  # use_scalar: false
+  
+  # 训练分解 (用于某些算法)
+  # train_decompose: false
+  
+  # 预设配置 (可选)
+  # preset: "full"  # "full", "attn-only", "unet-only", etc.
+
+# ============================================================================
+# 高级：为不同模块使用不同的LyCORIS配置
+# ============================================================================
+# 主模型的LyCORIS配置
+# lycoris_model:
+#   algo: locon
+#   linear_dim: 32
+#   linear_alpha: 16
+#   conv_dim: 32
+#   conv_alpha: 16
+#   factor: 4
+#   multiplier: 1.0
+# 
+# # Text Encoder的LyCORIS配置
+# lycoris_text_encoder:
+#   algo: locon
+#   linear_dim: 8
+#   linear_alpha: 4
+#   factor: 2
+#   multiplier: 1.0
+
+# ============================================================================
+# 高级训练配置
+# ============================================================================
+advanced:
+  snr_type: "lognorm"
+  no_shift: true
+  train_res: [1024]
+  vae_encode_batch_size: -1
+  use_ema: false  # LyCORIS训练通常不需要EMA
+  train_text_encoder: false  # 是否训练text encoder
+  text_encoder_lr: 5e-5
+  latents_mean: null
+  latents_std: null
+  
+# ============================================================================
+# Lightning框架配置
+# ============================================================================
+lightning:
+  accelerator: gpu
+  devices: 8
+  strategy: "deepspeed"
+  precision: bf16
+
+# ============================================================================
+# 数据集配置
+# ============================================================================
+dataset:
+  name: data_loader.arrow_load_stream.TextImageArrowStream 
+  target_area: 1048576  # 1024*1024
+  index_file: "dataset/porcelain/jsons/porcelain_mt.json"
+  multireso: true
+  num_workers: 8
+  random_flip: false
+
+# ============================================================================
+# 优化器配置
+# ============================================================================
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1e-4
+    weight_decay: 1e-2
+
+# ============================================================================
+# 学习率调度器配置
+# ============================================================================
+scheduler:
+  name: transformers.get_cosine_schedule_with_warmup
+  params:
+    num_warmup_steps: 1000
+    num_training_steps: 400000
+    num_cycles: 0.5
+    last_epoch: -1
+    
+# ============================================================================
+# 采样/验证配置
+# ============================================================================
+sampling:
+  enabled: true
+  use_wandb: true
+  seed: 1234
+  height: 1024
+  width: 1024
+  every_n_steps: 1000
+  every_n_epochs: 1
+  save_dir: "samples/lumina2_lycoris"
+  prompts:
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1girl, solo, long hair, blonde hair, blue eyes, smile, looking at viewer, outdoors, sky, day, cloud, blue sky"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1boy, solo, short hair, brown hair, brown eyes, standing, forest, nature, sunlight"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> best quality, masterpiece, 1girl, cat ears, white hair, red eyes, sitting, indoor, window, soft light"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 2girls, friendship, holding hands, sunset, beach, happy, colorful"
+
+# ============================================================================
+# LyCORIS算法说明
+# ============================================================================
+# 
+# 1. LoCoN (LoRA for Convolution) - 推荐
+#    - 最适合视觉模型
+#    - 支持卷积层和线性层
+#    - 参数量适中，效果好
+#    - 使用: algo: locon
+#
+# 2. LoHa (LoRA with Hadamard Product)
+#    - 使用Hadamard积分解
+#    - 参数更少
+#    - 训练速度更快
+#    - 使用: algo: loha
+#
+# 3. LoKr (LoRA with Kronecker Product)
+#    - 使用Kronecker积分解
+#    - 参数最少
+#    - 最高效
+#    - 使用: algo: lokr
+#
+# 4. DyLoRA (Dynamic LoRA)
+#    - 动态调整秩
+#    - 适合不确定最优秩的情况
+#    - 使用: algo: dylora
+#
+# ============================================================================
+# 参数调优建议
+# ============================================================================
+#
+# linear_dim (维度):
+#   - 4-8: 轻量级微调，参数少
+#   - 8-16: 标准配置，平衡性能和参数
+#   - 16-32: 重度微调，参数多，效果好
+#   - 32+: 接近全量训练
+#
+# linear_alpha (缩放):
+#   - 通常设为 linear_dim / 2
+#   - 也可以等于 linear_dim
+#   - 影响训练稳定性和学习率
+#
+# algo (算法):
+#   - locon: 视觉模型首选
+#   - lokr: 追求最小参数量
+#   - loha: 折中选择
+#
+# factor (分解因子):
+#   - 用于lokr/loha
+#   - 越小参数越少，但表达能力降低
+#   - 推荐: 2-8
+#
+# ============================================================================
+# 性能调优
+# ============================================================================
+#
+# 显存不足:
+#   - 减小 linear_dim (如从16降到8)
+#   - 增大 accumulate_grad_batches
+#   - 启用 checkpointing: true
+#   - 使用更高效的算法 (lokr)
+#
+# 训练不稳定:
+#   - 降低学习率
+#   - 增加 linear_alpha
+#   - 添加 dropout
+#   - 增加 warmup_steps
+#
+# 效果不佳:
+#   - 增大 linear_dim
+#   - 尝试不同的 algo
+#   - 延长训练时间
+#   - 检查数据质量

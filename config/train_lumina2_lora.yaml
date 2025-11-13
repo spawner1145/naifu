@@ -1,0 +1,91 @@
+name: lumina2-lora-train
+target: modules.lumina2_model_train_lora.setup
+adaptive_loss_weight: True
+
+model: 
+  tokenizer_path: /mnt/public/Lumina-Image-2.0/tokenizer
+  text_encoder_path: /mnt/public/Lumina-Image-2.0/text_encoder
+  model_name: NextDiT_2B_GQA_patch2_Adaln_Refiner
+  qk_norm: True
+  resume: null  # 如果需要从检查点恢复，设置路径
+  
+trainer:
+  auto_resume: false
+  init_from: /mnt/public/Lumina-Image-2.0
+  checkpointing: false
+  model_path: /mnt/public/Lumina-Image-2.0
+  batch_size: 2
+  seed: 19990326
+  wandb_id: "lumina2_lora_train"
+  use_xformers: false
+  accumulate_grad_batches: 8
+  grad_clip: 2
+  gradient_clip_val: 2
+  save_format: safetensors
+  checkpoint_dir: ./results/lumina2_lora
+  checkpoint_freq: 1
+  save_weights_only: true
+  max_epochs: 20
+  checkpoint_steps: 1000
+  max_steps: -1
+  resolution: 1024
+
+# LoRA配置
+use_lora: true
+lora_params:
+  r: 16  # LoRA rank
+  lora_alpha: 16  # LoRA alpha
+  lora_dropout: 0.0
+  bias: "none"
+  # target_modules自动选择注意力层，如需自定义可修改
+  target_modules: ["qkv", "out"]
+
+advanced:
+  snr_type: "lognorm"
+  no_shift: true
+  train_res: [1024]
+  use_ema: false  # LoRA训练通常不需要EMA
+  train_text_encoder: false  # 是否训练text encoder
+  text_encoder_lr: 5e-5  # text encoder学习率
+  
+lightning:
+  accelerator: gpu
+  devices: 8
+  strategy: "deepspeed"
+  precision: bf16
+
+dataset:
+  name: data_loader.arrow_load_stream.TextImageArrowStream 
+  target_area: 1024*1024
+  index_file: "dataset/porcelain/jsons/porcelain_mt.json"
+  multireso: true
+  num_workers: 8
+  random_flip: false
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1e-4  # LoRA通常使用较高的学习率
+    weight_decay: 1e-2
+
+scheduler:
+  name: transformers.get_cosine_schedule_with_warmup
+  params:
+    num_warmup_steps: 1000
+    num_training_steps: 400000
+    num_cycles: 0.5
+    last_epoch: -1
+    
+sampling:
+  enabled: true
+  use_wandb: true
+  seed: 1234
+  height: 1024
+  width: 1024
+  every_n_steps: 1000
+  every_n_epochs: 1
+  save_dir: "samples/lumina2_lora"
+  prompts:
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1girl, solo, long hair, blonde hair, blue eyes, smile, looking at viewer, outdoors, sky, day, cloud, blue sky"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> 1boy, solo, short hair, brown hair, brown eyes, standing, forest, nature, sunlight"
+    - "You are an assistant designed to generate anime images based on textual prompts. <Prompt Start> best quality, masterpiece, 1girl, cat ears, white hair, red eyes, sitting, indoor, window, soft light"
