@@ -23,21 +23,11 @@ def main():
     plugins = []
 
     strategy = config.lightning.pop("strategy", "auto")
-    strategy_params = config.lightning.pop("strategy_params", {})
     if "." in strategy:
-        strategy = get_class(strategy)(**strategy_params)
-    elif strategy == "ddp":
-        from lightning.fabric.strategies import DDPStrategy
-        strategy = DDPStrategy(**strategy_params)
-    elif strategy == "fsdp":
-        from lightning.fabric.strategies import FSDPStrategy
-        strategy = FSDPStrategy(**strategy_params)
-        
-    elif strategy == "deepspeed":
-        from lightning.fabric.strategies import DeepSpeedStrategy
-        strategy = DeepSpeedStrategy(**strategy_params)
+        _params = config.lightning.pop("strategy_params", {})
+        strategy = get_class(strategy)(**_params)
+
     loggers = pl.fabric.loggers.CSVLogger(".")
-    
     if config.trainer.wandb_id != "":
         from lightning.pytorch.loggers import WandbLogger
         kwargs = dict(project=config.trainer.wandb_id)

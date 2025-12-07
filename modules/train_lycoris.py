@@ -146,7 +146,7 @@ class StableDiffusionModel(SupervisedFineTune):
             self.forward_context = fabric.autocast()
             self.model.to(torch.float16)
         elif self.config.lightning.precision == "bf16-true":
-            self.forward_context = fabric.autocast()
+            # self.forward_context = fabric.autocast()
             self.model.to(torch.bfloat16)
     
     def init_model(self):
@@ -177,8 +177,18 @@ class StableDiffusionModel(SupervisedFineTune):
         self.text_encoder_2.to(self.target_device)
         self.text_encoder_1.load_state_dict(te1_sd, strict=False)
         self.text_encoder_2.load_state_dict(converted_sd, strict=False)
-        vae.load_state_dict(vae_sd)
-        unet.load_state_dict(unet_sd)
+
+        flux_vae_path = advanced.get("flux_vae_path")
+        if getattr(self.first_stage_model, "is_flux_vae", False) and flux_vae_path:
+            vae_sd = {}  # prefer external VAE when provided
+
+        if vae_sd:
+            merged_vae = self._merge_state_dict(self.first_stage_model.state_dict(), vae_sd)
+            self.first_stage_model.load_state_dict(merged_vae, strict=False)
+
+        if unet_sd:
+            merged_unet = self._merge_state_dict(self.model.state_dict(), unet_sd)
+            self.model.load_state_dict(merged_unet, strict=False)
         self.noise_scheduler = DDPMScheduler(
             beta_start=0.00085,
             beta_end=0.012,
@@ -207,7 +217,7 @@ class StableDiffusionModel(SupervisedFineTune):
         self.model.requires_grad_(False)
         self.text_encoder_1.requires_grad_(False)
         self.text_encoder_2.requires_grad_(False)
-        LycorisNetwork.apply_preset({"target_name": ".*"})
+        LycorisNetwork.apply_preset({"target_name": [".*"]}) 
 
         logger.info("")
         logger.info(f"Initializing model.lycoris_unet with {cfg.lycoris}")

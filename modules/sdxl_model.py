@@ -9,7 +9,9 @@ from tqdm import tqdm
 import torch.distributed as dist
 
 from models.sgm import GeneralConditioner
+from models.sgm.encoder_util import expand_dims_like
 from modules.sdxl_utils import disabled_train, UnetWrapper, AutoencoderKLWrapper
+from modules.flux_vae import FluxVAE
 from modules.scheduler_utils import apply_zero_terminal_snr, cache_snr_values
 from common.utils import get_class, load_torch_file, EmptyInitWrapper, get_world_size
 from common.logging import logger
@@ -59,16 +61,56 @@ class StableDiffusionModel(pl.LightningModule):
             vae_config = model_params.first_stage_config.params
             unet_config = model_params.network_config.params
             cond_config = model_params.conditioner_config.params
+
+        use_flux_vae = advanced.get("use_flux_vae", False)
+        if use_flux_vae and init_vae:
+            flux_params = advanced.get(
+                "flux_vae_params",
+                {
+                    "resolution": 256,
+                    "in_channels": 3,
+                    "ch": 128,
+                    "out_ch": 3,
+                    "ch_mult": [1, 2, 4, 4],
+                    "num_res_blocks": 2,
+                    "z_channels": 16,
+                    "scale_factor": 0.3611,
+                    "shift_factor": 0.1159,
+                },
+            )
+            # align UNet input/output channels to Flux latent channels to avoid adapters
+            unet_config.in_channels = flux_params.get("z_channels", 16)
+            unet_config.out_channels = flux_params.get("z_channels", 16)
+            vae = FluxVAE(
+                ae_params=flux_params,
+                ae_path=advanced.get("flux_vae_path"),
+                target_channels=flux_params.get("z_channels", 16),
+                target_scale_factor=advanced.get(
+                    "flux_target_scale_factor", flux_params.get("scale_factor")
+                ),
+            )
+            self.latent_channels = flux_params.get("z_channels", 16)
+        else:
+            vae = AutoencoderKLWrapper(**vae_config) if init_vae else None
+            self.latent_channels = vae_config.ddconfig.z_channels if hasattr(vae_config, "ddconfig") else 4
+
+        # instantiate UNet after potential flux param mutation of in/out channels
+        with EmptyInitWrapper(self.target_device):
             unet = UnetWrapper(unet_config) if init_unet else None
 
-        vae = AutoencoderKLWrapper(**vae_config) if init_vae else None
         conditioner = GeneralConditioner(**cond_config) if init_conditioner else None    
-        self.scale_factor = advanced.get("scale_factor", model_params.scale_factor)            
+        if use_flux_vae:
+            self.scale_factor = advanced.get(
+                "flux_scale_factor_override",
+                flux_params.get("scale_factor", model_params.scale_factor),
+            )
+        else:
+            self.scale_factor = advanced.get("scale_factor", model_params.scale_factor)
         if advanced.get("latents_mean", None):
             self.latents_mean = torch.tensor(advanced.latents_mean)
             self.latents_std = torch.tensor(advanced.latents_std)
-            self.latents_mean = self.latents_mean.view(1, 4, 1, 1).to(self.target_device)
-            self.latents_std = self.latents_std.view(1, 4, 1, 1).to(self.target_device)
+            self.latents_mean = self.latents_mean.view(1, self.latent_channels, 1, 1).to(self.target_device)
+            self.latents_std = self.latents_std.view(1, self.latent_channels, 1, 1).to(self.target_device)
 
         vae.eval()
         vae.train = disabled_train
@@ -94,7 +136,15 @@ class StableDiffusionModel(pl.LightningModule):
 
         self.to(self.target_device)
         logger.info(f"Loading model from {self.model_path}")
-        missing, unexpected = self.load_state_dict(sd, strict=False)
+
+        if getattr(self.first_stage_model, "is_flux_vae", False):
+            flux_vae_path = self.config.advanced.get("flux_vae_path")
+            # If an explicit Flux VAE path is given, skip checkpoint VAE weights; otherwise keep to support all-in-one loads
+            if flux_vae_path:
+                sd = {k: v for k, v in sd.items() if not k.startswith("first_stage_model.")}
+
+        merged_sd = self._merge_state_dict(self.state_dict(), sd)
+        missing, unexpected = self.load_state_dict(merged_sd, strict=False)
 
         if len(missing) > 0:
             logger.info(f"Missing Keys: {missing}")
@@ -118,6 +168,19 @@ class StableDiffusionModel(pl.LightningModule):
     def encode_batch(self, batch):
         self.conditioner.to(self.target_device)
         return self.conditioner(batch)
+
+    def dropout_cond(self, conds: dict):
+        bsz = conds['crossattn'].shape[0]
+        device = conds['crossattn'].device
+        dtype = conds['crossattn'].dtype
+
+        p = 1.0 - self.config.advanced.get("condition_dropout_rate")
+        batch_mask = torch.bernoulli(p * torch.ones(bsz, device=device, dtype=dtype))
+
+        for cond_batch in conds.values():
+            cond_batch.mul_(expand_dims_like(batch_mask, cond_batch))
+        
+        return conds
     
     def _denormlize(self, latents):
         if hasattr(self, "latents_mean"):
@@ -137,6 +200,11 @@ class StableDiffusionModel(pl.LightningModule):
 
     @torch.no_grad()
     def decode_first_stage(self, z):
+        self.first_stage_model = self.first_stage_model.float()
+        if getattr(self.first_stage_model, "is_flux_vae", False):
+            with torch.autocast("cuda", enabled=False):
+                return self.first_stage_model.decode_from_unet(z)
+
         z = self._denormlize(z)
         with torch.autocast("cuda", enabled=False):
             out = self.first_stage_model.decode(z)
@@ -146,12 +214,33 @@ class StableDiffusionModel(pl.LightningModule):
     def encode_first_stage(self, x):
         latents = []
         self.first_stage_model = self.first_stage_model.float()
+
+        if getattr(self.first_stage_model, "is_flux_vae", False):
+            with torch.autocast("cuda", enabled=False):
+                return self.first_stage_model.encode_for_unet(x, self.vae_encode_bsz)
+
         with torch.autocast("cuda", enabled=False):
             for i in range(0, x.shape[0], self.vae_encode_bsz):
                 o = x[i : i + self.vae_encode_bsz]
                 latents.append(self.first_stage_model.encode(o).sample())
         z = torch.cat(latents, dim=0)
         return self._normliaze(z)
+
+    def _merge_state_dict(self, target_sd: dict, src_sd: dict) -> dict:
+        """Copy overlapping tensor regions to maximize reuse when shapes differ (e.g., 4c -> 16c)."""
+        merged = target_sd.copy()
+        for k, src in src_sd.items():
+            if k not in merged:
+                continue
+            tgt = merged[k]
+            if tgt.shape == src.shape:
+                merged[k] = src
+            else:
+                slices = tuple(slice(0, min(tgt.size(i), src.size(i))) for i in range(src.dim()))
+                new_t = tgt.clone()
+                new_t[slices] = src[slices]
+                merged[k] = new_t
+        return merged
 
     def generate_samples(self, logger, current_epoch, global_step):
         if hasattr(self, "_fabric_wrapped"):
@@ -256,9 +345,13 @@ class StableDiffusionModel(pl.LightningModule):
         )
         if self.config.advanced.get("v_parameterization", False):
             scheduler_params["prediction_type"] = "v_prediction"
+        
+        if self.config.advanced.get("zero_terminal_snr", False):
+            scheduler_params["rescale_betas_zero_snr"] = True
 
         scheduler_cls = get_class(scheduler_name)
         scheduler = scheduler_cls(**scheduler_params)
+        
         prompts_batch = {
             "target_size_as_tuple": torch.stack([torch.asarray(size)]).cuda(),
             "original_size_as_tuple": torch.stack([torch.asarray(size)]).cuda(),
@@ -280,7 +373,7 @@ class StableDiffusionModel(pl.LightningModule):
         height = max(64, height - height % 8)  # round to divisible by 8
         width = max(64, width - width % 8)
         size = (height, width)
-        latents_shape = (1, 4, size[0] // 8, size[1] // 8)
+        latents_shape = (1, self.latent_channels, size[0] // 8, size[1] // 8)
         latents = torch.randn(latents_shape, generator=generator, dtype=torch.float32)
         latents = latents * scheduler.init_noise_sigma
 
@@ -312,6 +405,7 @@ class StableDiffusionModel(pl.LightningModule):
         return image
 
     def save_checkpoint(self, model_path, metadata):
+        save_vae = self.config.advanced.get("save_flux_vae", True)
         weight_to_save = None
         if hasattr(self, "_fsdp_engine"):
             from lightning.fabric.strategies.fsdp import _get_full_state_dict_context
@@ -327,10 +421,10 @@ class StableDiffusionModel(pl.LightningModule):
                 cond_weight = self.conditioner._forward_module.state_dict()
                 for key in cond_weight.keys():
                     weight_to_save[f"conditioner.{key}"] = cond_weight[key]
-                
-            vae_weight = self.first_stage_model.state_dict()
-            for key in vae_weight.keys():
-                weight_to_save[f"first_stage_model.{key}"] = vae_weight[key]
+            if save_vae:
+                vae_weight = self.first_stage_model.state_dict()
+                for key in vae_weight.keys():
+                    weight_to_save[f"first_stage_model.{key}"] = vae_weight[key]
         elif hasattr(self, "_deepspeed_engine"):
             from deepspeed import zero
             weight_to_save = {}
@@ -343,13 +437,15 @@ class StableDiffusionModel(pl.LightningModule):
                 cond_weight = self.conditioner.state_dict()
                 for key in cond_weight.keys():
                     weight_to_save[f"conditioner.{key}"] = cond_weight[key]
-                
-            vae_weight = self.first_stage_model.state_dict()
-            for key in vae_weight.keys():
-                weight_to_save[f"first_stage_model.{key}"] = vae_weight[key]
+            if save_vae:
+                vae_weight = self.first_stage_model.state_dict()
+                for key in vae_weight.keys():
+                    weight_to_save[f"first_stage_model.{key}"] = vae_weight[key]
                 
         else:
             weight_to_save = self.state_dict()
+            if not save_vae:
+                weight_to_save = {k: v for k, v in weight_to_save.items() if not k.startswith("first_stage_model.")}
                 
         self._save_checkpoint(model_path, weight_to_save, metadata)
 

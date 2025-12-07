@@ -76,7 +76,10 @@ def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
         model.model, optimizer = fabric.setup(model.model, optimizer)
         if config.advanced.get("train_text_encoder_1") or config.advanced.get("train_text_encoder_2"):
             model.conditioner = fabric.setup(model.conditioner)
-        
+
+    if hasattr(model, "mark_forward_method"):
+        model.mark_forward_method('generate_samples')
+
     dataloader = fabric.setup_dataloaders(dataloader)
     model._fabric_wrapped = fabric
     return model, dataset, dataloader, optimizer, scheduler
@@ -108,6 +111,10 @@ class SupervisedFineTune(StableDiffusionModel):
             latents = self._normliaze(batch["pixels"])
 
         cond = self.encode_batch(batch)
+
+        if advanced.get("condition_dropout_rate", 0.0) > 0.0:
+            cond = self.dropout_cond(cond)
+
         model_dtype = next(self.model.parameters()).dtype
         cond = {k: v.to(model_dtype) for k, v in cond.items()}
 

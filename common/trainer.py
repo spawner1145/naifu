@@ -3,13 +3,11 @@ import time
 
 import torch
 import lightning as pl
-from tqdm import tqdm
 
 from common.utils import *
 from common.logging import logger
 from omegaconf import OmegaConf
 from pathlib import Path
-from lightning.fabric.strategies import DeepSpeedStrategy
 
 class Trainer:
     def __init__(self, fabric: pl.Fabric, config: OmegaConf):
@@ -31,10 +29,7 @@ class Trainer:
         self.dataloader = dataloader
         self.global_step = int(config.get("global_step", 0))
         self.current_epoch = int(config.get("current_epoch", 0))
-        
-        strategy_path = self.model.config.lightning.get("strategy", "")
-        self.is_deepspeed = isinstance(self.fabric.strategy, DeepSpeedStrategy)
-                
+
     def prepare_logger(self):
         """Prepare the logger and log hyperparameters if the logger is not CSVLogger."""
         fabric = self.fabric
@@ -144,18 +139,7 @@ class Trainer:
         
         self.model.save_checkpoint(model_path, metadata)
         if not save_weights_only:
-            # 如果是Nextdit模型，则保存optimizer状态
-            if "NextDiT" in self.model.config.model.name:
-                optimizer_state = {"optimizer": self.optimizer, **metadata}
-                opt_state_fn = f"optimizer.{self.fabric.get_rank():05d}-of-" f"{self.fabric.get_world_size():05d}.pth"
-                torch.save(self.optimizer.state_dict(), os.path.join(model_path, opt_state_fn))
-                self.fabric.barrier()
-                logger.info(f"Saved optimizer to {model_path}.")
-                if self.fabric.get_rank() == 0:
-                    torch.save(self.model.config, os.path.join(model_path, "model_args.pth"))
-                    with open(os.path.join(model_path, "resume_step.txt"), "w") as f:
-                        print(self.global_step + 1, file=f)
-                        
+            optimizer_state = {"optimizer": self.optimizer, **metadata}
             self.fabric.save(model_path + "_optimizer.pt", optimizer_state)
             
         if "schedulefree" in self.optimizer.__class__.__name__.lower():
@@ -287,10 +271,7 @@ class Trainer:
                 fabric_module = getattr(self.model, "model", None)
                 if hasattr(self.model, "get_module"):
                     fabric_module = self.model.get_module()
-                
-                # 确保模型被正确设置
-                assert fabric_module is not None, "Model setup failed."
-
+                    
                 with fabric.no_backward_sync(fabric_module, enabled=is_accumulating):
                 # with torch.autograd.detect_anomaly():
                     loss = self.model(batch)
@@ -309,11 +290,7 @@ class Trainer:
                 if is_accumulating:
                     continue
 
-                # 检查是否使用 DeepSpeed 策略
-
-                # if is_deepspeed:
-                #     logger.info("使用DeepSpeed策略")
-                if grad_clip_val > 0 and not self.is_deepspeed:
+                if grad_clip_val > 0:
                     grad_norm = self.fabric.clip_gradients(
                         module=fabric_module, 
                         optimizer=self.optimizer, 

@@ -1,1 +1,0 @@
-python /mnt/public/naifu/utils/json2utf8.py /mnt/public/soso/半身刻画脸_untar -r
