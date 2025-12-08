@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 import torch
 import torch.utils.checkpoint
@@ -35,7 +36,8 @@ class StableDiffusionModel(pl.LightningModule):
         config = self.config
         advanced = config.get("advanced", {})
 
-        model_params = model_config.model.params
+        # 深拷贝配置，避免全局 model_config 被 Flux VAE 通道修改污染后续实例
+        model_params = copy.deepcopy(model_config.model.params)
         if trainer_cfg.use_xformers:
             unet_config = model_params.network_config.params
             vae_config = model_params.first_stage_config.params
@@ -63,7 +65,8 @@ class StableDiffusionModel(pl.LightningModule):
             cond_config = model_params.conditioner_config.params
 
         use_flux_vae = advanced.get("use_flux_vae", False)
-        if use_flux_vae and init_vae:
+        flux_params = None
+        if use_flux_vae:
             flux_params = advanced.get(
                 "flux_vae_params",
                 {
@@ -78,18 +81,22 @@ class StableDiffusionModel(pl.LightningModule):
                     "shift_factor": 0.1159,
                 },
             )
-            # align UNet input/output channels to Flux latent channels to avoid adapters
-            unet_config.in_channels = flux_params.get("z_channels", 16)
-            unet_config.out_channels = flux_params.get("z_channels", 16)
-            vae = FluxVAE(
-                ae_params=flux_params,
-                ae_path=advanced.get("flux_vae_path"),
-                target_channels=flux_params.get("z_channels", 16),
-                target_scale_factor=advanced.get(
-                    "flux_target_scale_factor", flux_params.get("scale_factor")
-                ),
-            )
-            self.latent_channels = flux_params.get("z_channels", 16)
+            flux_z = flux_params.get("z_channels", 16)
+            # 即便不初始化 VAE，也要让 UNet 通道与 Flux latent 对齐，避免 4c/16c 混用
+            unet_config.in_channels = flux_z
+            unet_config.out_channels = flux_z
+            self.latent_channels = flux_z
+            if init_vae:
+                vae = FluxVAE(
+                    ae_params=flux_params,
+                    ae_path=advanced.get("flux_vae_path"),
+                    target_channels=flux_z,
+                    target_scale_factor=advanced.get(
+                        "flux_target_scale_factor", flux_params.get("scale_factor")
+                    ),
+                )
+            else:
+                vae = None
         else:
             vae = AutoencoderKLWrapper(**vae_config) if init_vae else None
             self.latent_channels = vae_config.ddconfig.z_channels if hasattr(vae_config, "ddconfig") else 4
@@ -128,6 +135,38 @@ class StableDiffusionModel(pl.LightningModule):
 
     def init_model(self):
         advanced = self.config.get("advanced", {})
+        if advanced.get("use_flux_vae", False):
+            flux_params = advanced.get("flux_vae_params", {})
+            flux_scale = advanced.get(
+                "flux_target_scale_factor", flux_params.get("scale_factor", 0.3611)
+            )
+            flux_z = flux_params.get("z_channels", 16)
+            try:
+                ds_rescale = self.config.dataset.get("rescale_latents", None)
+            except Exception:
+                ds_rescale = None
+            if ds_rescale not in (False, None):
+                logger.warning(
+                    "use_flux_vae 已启用，检测到 dataset.rescale_latents=%s，将其置为 False 以避免二次缩放",
+                    ds_rescale,
+                )
+                try:
+                    self.config.dataset.rescale_latents = False
+                except Exception:
+                    pass
+            # 强制对齐 Flux latent 量纲，避免沿用旧的 SDXL 数据预处理配置
+            try:
+                if getattr(self.config.dataset, "scale_factor", None) not in (flux_scale, None):
+                    logger.warning(
+                        "use_flux_vae 已启用，将 dataset.scale_factor 从 %s 覆盖为 %s",
+                        getattr(self.config.dataset, "scale_factor", None),
+                        flux_scale,
+                    )
+                self.config.dataset.scale_factor = flux_scale
+                self.config.dataset.scale_channels = (flux_z,)
+            except Exception:
+                pass
+
         sd = load_torch_file(self.model_path, self.target_device)
         self.first_stage_model, self.model, self.conditioner = self.build_models()
         self.noise_scheduler = DDPMScheduler(
@@ -246,17 +285,34 @@ class StableDiffusionModel(pl.LightningModule):
     def _merge_state_dict(self, target_sd: dict, src_sd: dict) -> dict:
         """Copy overlapping tensor regions to maximize reuse when shapes differ (e.g., 4c -> 16c)."""
         merged = target_sd.copy()
+        preserved = 0
+        partial = []
+
         for k, src in src_sd.items():
             if k not in merged:
                 continue
             tgt = merged[k]
             if tgt.shape == src.shape:
                 merged[k] = src
+                preserved += 1
             else:
                 slices = tuple(slice(0, min(tgt.size(i), src.size(i))) for i in range(src.dim()))
-                new_t = tgt.clone()
+                # 初始化为零，避免 EmptyInitWrapper 下 clone 留下未定义的内存值
+                new_t = torch.zeros_like(tgt)
                 new_t[slices] = src[slices]
                 merged[k] = new_t
+                partial.append((k, tuple(src.shape), tuple(tgt.shape)))
+
+        if partial:
+            sample = ", ".join(f"{k}: {s}->{t}" for k, s, t in partial[:5])
+            logger.info(
+                "State reuse stats: preserved=%d partial=%d (sample: %s)",
+                preserved,
+                len(partial),
+                sample,
+            )
+        else:
+            logger.info("State reuse stats: preserved=%d partial=0", preserved)
         return merged
 
     def _filter_flux_vae_weights(self, sd: dict) -> dict:

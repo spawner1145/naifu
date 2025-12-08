@@ -209,7 +209,18 @@ class StoreBase(Dataset):
         return k, res, index_new
 
 class LatentStore(StoreBase):
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        scale_factor: float | None = 0.13025,
+        rescale_latents: bool = True,
+        scale_channels: tuple[int, ...] | None = (4,),
+        **kwargs,
+    ):
+        self.scale_factor = scale_factor
+        self.rescale_latents = rescale_latents
+        self.scale_channels = tuple(scale_channels) if scale_channels is not None else None
+
         super().__init__(*args, **kwargs)
         prompt_mapping = next(dirwalk(self.root_path, lambda p: p.suffix == ".json"))
         prompt_mapping = json_lib.loads(Path(prompt_mapping).read_text())
@@ -257,7 +268,6 @@ class LatentStore(StoreBase):
                 
         progress.close()
         self.length = len(self.keys)
-        self.scale_factor = 0.13025
         logger.debug(f"Loaded {self.length} latent codes from {self.root_path}")
 
         self.keys, self.raw_res, self.paths = self.repeat_entries(self.keys, self.raw_res, index=self.paths)
@@ -283,10 +293,17 @@ class LatentStore(StoreBase):
         latent = torch.asarray(self.h5_filehandles[h5_path][latent_key][:]).float()
         dhdw = self.h5_filehandles[h5_path][latent_key].attrs.get("dhdw", (0, 0))
     
-        # if scaled, we need to unscale the latent (training process will scale it back)
+        # if scaled, optionally unscale; allow Flux 等多通道 latent 跳过默认 0.13025 的反标尺
         scaled = self.h5_filehandles[h5_path][latent_key].attrs.get("scale", True)
-        if scaled:
-            latent = 1.0 / self.scale_factor * latent
+        latent_channels = latent.shape[0] if latent.ndim == 3 else latent.shape[1] if latent.ndim == 4 else None
+        if scaled and self.rescale_latents:
+            channel_match = self.scale_channels is None or (
+                latent_channels in self.scale_channels if latent_channels is not None else False
+            )
+            if channel_match and self.scale_factor is not None:
+                latent = latent / self.scale_factor
+            elif channel_match and self.scale_factor is None:
+                raise ValueError("scale_factor is None while rescale_latents is True")
 
         extras = self.get_batch_extras(self.paths[index])
         return True, latent, prompt, original_size, dhdw, extras

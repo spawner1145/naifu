@@ -9,11 +9,22 @@ def _load_flux_state(path: str):
     if path is None:
         return None
     if path.endswith((".sft", ".safetensors")):
-        return load_sft_file(path)
-    state = torch.load(path, map_location="cpu")
-    if "state_dict" in state:
-        state = state["state_dict"]
-    return {k.replace("model.", "").replace("module.", ""): v for k, v in state.items()}
+        state = load_sft_file(path)
+    else:
+        state = torch.load(path, map_location="cpu")
+        if "state_dict" in state:
+            state = state["state_dict"]
+
+    cleaned = {}
+    prefixes = ("first_stage_model.", "model.", "module.", "ae.")
+    for k, v in state.items():
+        new_k = k
+        for p in prefixes:
+            if new_k.startswith(p):
+                new_k = new_k[len(p) :]
+                break
+        cleaned[new_k] = v
+    return cleaned
 
 
 class _Posterior:

@@ -11,12 +11,26 @@ from lightning.pytorch.utilities.model_summary import ModelSummary
 
 def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
     model_path = config.trainer.model_path
+    advanced = config.get("advanced", {})
     model = SupervisedFineTune(
         model_path=model_path, 
         config=config, 
         device=fabric.device
     )
     dataset_class = get_class(config.dataset.get("name", "data.AspectRatioDataset"))
+
+    if advanced.get("use_flux_vae", False):
+        flux_params = advanced.get("flux_vae_params", {})
+        flux_scale = advanced.get("flux_target_scale_factor", flux_params.get("scale_factor", 0.3611))
+        flux_z = flux_params.get("z_channels", 16)
+
+        # 强制对齐 Flux latent 量纲，避免沿用旧的 SDXL 配置导致重复除以 0.13025
+        if config.dataset.get("rescale_latents", None) not in (False, None):
+            logger.warning("use_flux_vae 启用时强制关闭 rescale_latents 以避免二次缩放")
+        config.dataset.rescale_latents = False
+        config.dataset.scale_factor = flux_scale
+        config.dataset.scale_channels = (flux_z,)
+
     dataset = dataset_class(
         batch_size=config.trainer.batch_size,
         rank=fabric.global_rank,
@@ -53,10 +67,28 @@ def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
         remainder = {}
         if latest_ckpt:
             logger.info(f"Loading weights from {latest_ckpt}")
-            remainder = sd = load_torch_file(ckpt=latest_ckpt, extract=False)
+            remainder = sd_raw = load_torch_file(ckpt=latest_ckpt, extract=False)
             if latest_ckpt.endswith(".safetensors"):
                 remainder = safetensors.safe_open(latest_ckpt, "pt").metadata()
-            model.load_state_dict(sd.get("state_dict", sd))
+
+            sd = sd_raw.get("state_dict", sd_raw)
+            if advanced.get("use_flux_vae", False):
+                # 对 resume 同样使用 Flux 过滤/适配逻辑，避免 4c/16c 形状不匹配
+                if advanced.get("flux_vae_path"):
+                    sd = {k: v for k, v in sd.items() if not k.startswith("first_stage_model.")}
+                else:
+                    sd = model._filter_flux_vae_weights(sd)
+                sd = model._merge_state_dict(model.state_dict(), sd)
+                strict = False
+            else:
+                strict = False
+
+            missing, unexpected = model.load_state_dict(sd, strict=strict)
+            if missing:
+                logger.info(f"resume missing keys: {missing}")
+            if unexpected:
+                logger.info(f"resume unexpected keys: {unexpected}")
+
             config.global_step = remainder.get("global_step", 0)
             config.current_epoch = remainder.get("current_epoch", 0)
         
