@@ -296,11 +296,8 @@ class StableDiffusionModel(pl.LightningModule):
                 merged[k] = src
                 preserved += 1
             else:
-                slices = tuple(slice(0, min(tgt.size(i), src.size(i))) for i in range(src.dim()))
-                # 初始化为零，避免 EmptyInitWrapper 下 clone 留下未定义的内存值
-                new_t = torch.zeros_like(tgt)
-                new_t[slices] = src[slices]
-                merged[k] = new_t
+                # 形状不兼容时直接保留 target 的初始化权重（视为重新随机初始化该层）
+                merged[k] = tgt
                 partial.append((k, tuple(src.shape), tuple(tgt.shape)))
 
         if partial:
