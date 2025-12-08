@@ -109,7 +109,12 @@ class SupervisedFineTune(StableDiffusionModel):
                 latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
         else:
             self.first_stage_model.cpu()
-            latents = self._normliaze(batch["pixels"])
+            latents = batch["pixels"]
+            if getattr(self.first_stage_model, "is_flux_vae", False):
+                # Flux latents已经处在目标量纲，不要重复_normliaze
+                latents = latents.to(device=self.target_device)
+            else:
+                latents = self._normliaze(latents)
 
         cond = self.encode_batch(batch)
 

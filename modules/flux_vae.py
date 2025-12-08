@@ -70,15 +70,21 @@ class FluxVAE(nn.Module):
     def encode_for_unet(self, x: torch.Tensor, bsz: int) -> torch.Tensor:
         latents = []
         x = x.float()
+        scale = self.target_scale_factor / self.ae_params.scale_factor
         for i in range(0, x.shape[0], bsz):
             chunk = x[i : i + bsz]
             z = self.ae.encode(chunk)
+            if scale != 1.0:
+                z = z * scale
             latents.append(z)
         return torch.cat(latents, dim=0)
 
     @torch.no_grad()
     def decode_from_unet(self, z_unet: torch.Tensor) -> torch.Tensor:
         z_unet = z_unet.float()
+        scale = self.ae_params.scale_factor / self.target_scale_factor
+        if scale != 1.0:
+            z_unet = z_unet * scale
         return self.ae.decode(z_unet)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

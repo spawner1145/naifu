@@ -100,17 +100,26 @@ class StableDiffusionModel(pl.LightningModule):
 
         conditioner = GeneralConditioner(**cond_config) if init_conditioner else None    
         if use_flux_vae:
-            self.scale_factor = advanced.get(
-                "flux_scale_factor_override",
-                flux_params.get("scale_factor", model_params.scale_factor),
-            )
+            # Flux 路径直接使用 Flux VAE 的 scale_factor；不再沿用 SDXL 预训练的 0.13025
+            self.scale_factor = flux_params.get("scale_factor", model_params.scale_factor)
         else:
             self.scale_factor = advanced.get("scale_factor", model_params.scale_factor)
-        if advanced.get("latents_mean", None):
-            self.latents_mean = torch.tensor(advanced.latents_mean)
-            self.latents_std = torch.tensor(advanced.latents_std)
-            self.latents_mean = self.latents_mean.view(1, self.latent_channels, 1, 1).to(self.target_device)
-            self.latents_std = self.latents_std.view(1, self.latent_channels, 1, 1).to(self.target_device)
+
+        latents_mean = advanced.get("latents_mean", None)
+        latents_std = advanced.get("latents_std", None)
+        if latents_mean is not None and latents_std is not None:
+            lm = torch.tensor(latents_mean)
+            ls = torch.tensor(latents_std)
+            if lm.numel() != self.latent_channels or ls.numel() != self.latent_channels:
+                logger.warning(
+                    "Ignore latents_mean/std: length %d/%d mismatches latent_channels=%d",
+                    lm.numel(),
+                    ls.numel(),
+                    self.latent_channels,
+                )
+            else:
+                self.latents_mean = lm.view(1, self.latent_channels, 1, 1).to(self.target_device)
+                self.latents_std = ls.view(1, self.latent_channels, 1, 1).to(self.target_device)
 
         vae.eval()
         vae.train = disabled_train
@@ -139,9 +148,17 @@ class StableDiffusionModel(pl.LightningModule):
 
         if getattr(self.first_stage_model, "is_flux_vae", False):
             flux_vae_path = self.config.advanced.get("flux_vae_path")
-            # If an explicit Flux VAE path is given, skip checkpoint VAE weights; otherwise keep to support all-in-one loads
+            has_vae_weights = any(k.startswith("first_stage_model.") for k in sd)
+
             if flux_vae_path:
+                # 有外部 Flux VAE 时，优先用外部权重，过滤掉 checkpoint 内的 VAE
                 sd = {k: v for k, v in sd.items() if not k.startswith("first_stage_model.")}
+                logger.info("Filtered first_stage_model.* from checkpoint (using flux_vae_path override)")
+            elif has_vae_weights:
+                # 检查形状匹配，仅当 checkpoint VAE 与目标 Flux VAE 完全对齐时才保留
+                sd = self._filter_flux_vae_weights(sd)
+            else:
+                logger.info("Flux VAE enabled but checkpoint无 VAE 权重，将使用随机初始化/外部加载")
 
         merged_sd = self._merge_state_dict(self.state_dict(), sd)
         missing, unexpected = self.load_state_dict(merged_sd, strict=False)
@@ -241,6 +258,30 @@ class StableDiffusionModel(pl.LightningModule):
                 new_t[slices] = src[slices]
                 merged[k] = new_t
         return merged
+
+    def _filter_flux_vae_weights(self, sd: dict) -> dict:
+        """Keep checkpoint VAE weights only when shapes fully match Flux VAE target."""
+        target_sd = self.first_stage_model.state_dict()
+        fs_keys = [k for k in sd if k.startswith("first_stage_model.")]
+        if not fs_keys:
+            return sd
+
+        mismatch = []
+        for k in fs_keys:
+            tgt_key = k.replace("first_stage_model.", "")
+            if tgt_key not in target_sd or target_sd[tgt_key].shape != sd[k].shape:
+                mismatch.append(k)
+
+        if mismatch:
+            logger.info(
+                "Drop checkpoint VAE weights due to shape mismatch (%d/%d mismatched)",
+                len(mismatch),
+                len(fs_keys),
+            )
+            return {k: v for k, v in sd.items() if not k.startswith("first_stage_model.")}
+
+        logger.info("Keeping checkpoint VAE weights (shapes match Flux VAE)")
+        return sd
 
     def generate_samples(self, logger, current_epoch, global_step):
         if hasattr(self, "_fabric_wrapped"):

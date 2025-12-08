@@ -25,6 +25,9 @@ class StableDiffusionModel(pl.LightningModule):
         trainer_cfg = self.config.trainer
         config = self.config
         advanced = config.get("advanced", {})
+
+        if advanced.get("use_flux_vae", False):
+            raise NotImplementedError("Flux VAE not supported in diffusers pipeline path; use training stack")
         
         logger.info(f"Loading model from {self.model_path}")
         p = StableDiffusionXLPipeline
