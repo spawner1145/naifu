@@ -102,7 +102,8 @@ class SupervisedFineTune(StableDiffusionModel):
         advanced = self.config.get("advanced", {})
         if not batch["is_latent"]:
             self.first_stage_model.to(self.target_device)
-            latents = self.encode_first_stage(batch["pixels"].to(self.first_stage_model.dtype))
+            fs_dtype = next(self.first_stage_model.parameters()).dtype
+            latents = self.encode_first_stage(batch["pixels"].to(device=self.target_device, dtype=fs_dtype))
             if torch.any(torch.isnan(latents)):
                 logger.info("NaN found in latents, replacing with zeros")
                 latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
