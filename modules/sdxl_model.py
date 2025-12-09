@@ -218,6 +218,24 @@ class StableDiffusionModel(pl.LightningModule):
         if hasattr(self.noise_scheduler, "alphas_cumprod"):
             cache_snr_values(self.noise_scheduler, self.target_device)
 
+        # Quick VAE sanity: decode random latents and ensure variance is non-zero.
+        try:
+            if getattr(self.first_stage_model, "is_flux_vae", False):
+                with torch.no_grad():
+                    probe = torch.randn(1, self.latent_channels, 8, 8, device=self.target_device)
+                    out = self.first_stage_model.decode_from_unet(probe).float()
+                    std_val = out.std().item()
+                    mean_val = out.mean().item()
+                    if std_val < 1e-5:
+                        logger.warning(
+                            "Flux VAE decode std too small (%.6f, mean=%.6f)。请检查 flux_vae_path 是否正确、权重是否匹配 z_channels=%d",
+                            std_val,
+                            mean_val,
+                            self.latent_channels,
+                        )
+        except Exception as exc:
+            logger.warning("Flux VAE sanity check failed: %s", exc)
+
     def get_module(self):
         return self.model
 
@@ -283,9 +301,50 @@ class StableDiffusionModel(pl.LightningModule):
         return self._normliaze(z)
 
     def _merge_state_dict(self, target_sd: dict, src_sd: dict) -> dict:
-        """Copy overlapping tensor regions to maximize reuse when shapes differ (e.g., 4c -> 16c)."""
+        """Try to reuse weights even when channel dims differ (4c -> 16c) by repeating."""
+
+        def _try_expand(src: torch.Tensor, tgt_shape: torch.Size) -> torch.Tensor | None:
+            # Only attempt simple channel repeats; fall back to None on mismatch.
+            if src.shape == tgt_shape:
+                return src
+
+            # Conv weight: (out, in, kH, kW)
+            if src.ndim == 4 and len(tgt_shape) == 4:
+                so, si, kh, kw = src.shape
+                to, ti, tkh, tkw = tgt_shape
+                if kh == tkh and kw == tkw and to % so == 0 and ti % si == 0:
+                    ro = to // so
+                    ri = ti // si
+                    expanded = src.repeat(ro, ri, 1, 1)[:to, :ti, :, :]
+                    return expanded
+                return None
+
+            # Linear / embedding: (out, in)
+            if src.ndim == 2 and len(tgt_shape) == 2:
+                so, si = src.shape
+                to, ti = tgt_shape
+                if to % so == 0 and ti % si == 0:
+                    ro = to // so
+                    ri = ti // si
+                    expanded = src.repeat(ro, ri)[:to, :ti]
+                    return expanded
+                return None
+
+            # Norm / bias / weight: (C,)
+            if src.ndim == 1 and len(tgt_shape) == 1:
+                sc = src.shape[0]
+                tc = tgt_shape[0]
+                if tc % sc == 0:
+                    r = tc // sc
+                    expanded = src.repeat(r)[:tc]
+                    return expanded
+                return None
+
+            return None
+
         merged = target_sd.copy()
         preserved = 0
+        adapted = 0
         partial = []
 
         for k, src in src_sd.items():
@@ -295,6 +354,12 @@ class StableDiffusionModel(pl.LightningModule):
             if tgt.shape == src.shape:
                 merged[k] = src
                 preserved += 1
+                continue
+
+            expanded = _try_expand(src, tgt.shape)
+            if expanded is not None:
+                merged[k] = expanded.to(dtype=tgt.dtype)
+                adapted += 1
             else:
                 # 形状不兼容时直接保留 target 的初始化权重（视为重新随机初始化该层）
                 merged[k] = tgt
@@ -303,13 +368,14 @@ class StableDiffusionModel(pl.LightningModule):
         if partial:
             sample = ", ".join(f"{k}: {s}->{t}" for k, s, t in partial[:5])
             logger.info(
-                "State reuse stats: preserved=%d partial=%d (sample: %s)",
+                "State reuse stats: preserved=%d adapted=%d partial=%d (sample: %s)",
                 preserved,
+                adapted,
                 len(partial),
                 sample,
             )
         else:
-            logger.info("State reuse stats: preserved=%d partial=0", preserved)
+            logger.info("State reuse stats: preserved=%d adapted=%d partial=0", preserved, adapted)
         return merged
 
     def _filter_flux_vae_weights(self, sd: dict) -> dict:
