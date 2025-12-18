@@ -195,6 +195,11 @@ class Trainer:
         config = self.model.config
         fabric = self.fabric
         cfg = config.trainer
+
+        debug_updates = bool(cfg.get("debug_param_update", False))
+        debug_every = int(cfg.get("debug_param_update_every", 50))
+        debug_param = None
+        debug_param_name = None
         
         grad_accum_steps = cfg.accumulate_grad_batches
         grad_clip_val = cfg.gradient_clip_val
@@ -299,15 +304,68 @@ class Trainer:
                     if grad_norm is not None:
                         metrics["train/grad_norm"] = grad_norm
 
+                # Debug: verify optimizer actually updates parameters.
+                # Enabled via trainer.debug_param_update: true
+                # Prints every trainer.debug_param_update_every steps (default 50).
+                debug_should_print = (
+                    debug_updates
+                    and fabric.is_global_zero
+                    and (self.global_step % max(1, debug_every) == 0)
+                    and (self.optimizer is not None)
+                )
+                debug_before = None
+                debug_grad_max = None
+                debug_lr0 = None
+                if debug_should_print:
+                    try:
+                        if debug_param is None:
+                            for n, p in fabric_module.named_parameters():
+                                if p is None or (not getattr(p, "requires_grad", False)):
+                                    continue
+                                if p.numel() == 0:
+                                    continue
+                                if not p.is_floating_point():
+                                    continue
+                                debug_param = p
+                                debug_param_name = n
+                                break
+                        if debug_param is not None:
+                            debug_before = debug_param.detach().flatten()[:16].float().cpu()
+                            if debug_param.grad is not None:
+                                debug_grad_max = debug_param.grad.detach().float().abs().max().item()
+                            if len(self.optimizer.param_groups) > 0:
+                                debug_lr0 = self.optimizer.param_groups[0].get("lr")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("debug_param_update snapshot failed: %s", exc)
+
                 if self.optimizer is not None:
                     self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
+
+                if debug_should_print and debug_before is not None and debug_param is not None:
+                    try:
+                        debug_after = debug_param.detach().flatten()[:16].float().cpu()
+                        delta = (debug_after - debug_before).abs().max().item()
+                        logger.info(
+                            "[debug] step=%d lr0=%s param=%s grad_max=%s w_delta_max=%.6g",
+                            self.global_step,
+                            f"{debug_lr0:.3e}" if isinstance(debug_lr0, (float, int)) else str(debug_lr0),
+                            debug_param_name or "<unknown>",
+                            f"{debug_grad_max:.3e}" if isinstance(debug_grad_max, (float, int)) else str(debug_grad_max),
+                            delta,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("debug_param_update compare failed: %s", exc)
 
                 if self.scheduler is not None:
                     is_transformers_sch = "transformers" in config.scheduler.name
                     fp_batch = self.current_epoch + batch_idx / len(self.dataloader)
                     actual_step = self.global_step if is_transformers_sch else fp_batch
-                    self.scheduler.step(actual_step)
+                    try:
+                        # Some schedulers accept an explicit step/epoch value, others require step() with no args.
+                        self.scheduler.step(actual_step)
+                    except TypeError:
+                        self.scheduler.step()
 
                 if fabric.logger:
                     fabric.log_dict(metrics=metrics, step=self.global_step)

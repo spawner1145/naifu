@@ -12,24 +12,27 @@ from lightning.pytorch.utilities.model_summary import ModelSummary
 def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
     model_path = config.trainer.model_path
     advanced = config.get("advanced", {})
-    model = SupervisedFineTune(
-        model_path=model_path, 
-        config=config, 
-        device=fabric.device
-    )
-    dataset_class = get_class(config.dataset.get("name", "data.AspectRatioDataset"))
-
     if advanced.get("use_flux_vae", False):
         flux_params = advanced.get("flux_vae_params", {})
-        flux_scale = advanced.get("flux_target_scale_factor", flux_params.get("scale_factor", 0.3611))
+        flux_scale = advanced.get(
+            "flux_target_scale_factor", flux_params.get("scale_factor", 0.3611)
+        )
         flux_z = flux_params.get("z_channels", 16)
 
-        # 强制对齐 Flux latent 量纲，避免沿用旧的 SDXL 配置导致重复除以 0.13025
+        # Flux VAE latents（16c）在 encode_for_unet 后已经处于 UNet 量纲；
+        # latent cache 路径应直接使用，不要再做 LatentStore 的反标尺，也不要 _normliaze。
         if config.dataset.get("rescale_latents", None) not in (False, None):
-            logger.warning("use_flux_vae 启用时强制关闭 rescale_latents 以避免二次缩放")
+            logger.warning("use_flux_vae 启用时强制关闭 rescale_latents 以避免错误缩放")
         config.dataset.rescale_latents = False
         config.dataset.scale_factor = flux_scale
         config.dataset.scale_channels = (flux_z,)
+
+    model = SupervisedFineTune(
+        model_path=model_path,
+        config=config,
+        device=fabric.device,
+    )
+    dataset_class = get_class(config.dataset.get("name", "data.AspectRatioDataset"))
 
     dataset = dataset_class(
         batch_size=config.trainer.batch_size,
@@ -142,9 +145,10 @@ class SupervisedFineTune(StableDiffusionModel):
         else:
             self.first_stage_model.cpu()
             latents = batch["pixels"]
+            latents = latents.to(device=self.target_device)
             if getattr(self.first_stage_model, "is_flux_vae", False):
-                # Flux latents已经处在目标量纲，不要重复_normliaze
-                latents = latents.to(device=self.target_device)
+                # Flux latents 已经处在目标量纲，不要重复 _normliaze
+                pass
             else:
                 latents = self._normliaze(latents)
 

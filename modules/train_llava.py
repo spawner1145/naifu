@@ -246,8 +246,16 @@ class LLaVAModel(pl.LightningModule):
             weight_to_save = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
             param = next(self.model.parameters())
             if hasattr(param, "ds_id") and hasattr(self, "_deepspeed_engine"):
-                from deepspeed import zero
-    
+                try:
+                    import importlib
+
+                    zero = importlib.import_module("deepspeed").zero
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        "DeepSpeed strategy is active but deepspeed is not available. "
+                        "Install DeepSpeed or switch strategy away from DeepSpeed."
+                    ) from exc
+
                 with zero.GatheredParameters([param]):
                     for k, v in weight_to_save.items():
                         v = v.data.detach().cpu().clone()

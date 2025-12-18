@@ -107,8 +107,12 @@ class StableDiffusionModel(pl.LightningModule):
 
         conditioner = GeneralConditioner(**cond_config) if init_conditioner else None    
         if use_flux_vae:
-            # Flux 路径直接使用 Flux VAE 的 scale_factor；不再沿用 SDXL 预训练的 0.13025
-            self.scale_factor = flux_params.get("scale_factor", model_params.scale_factor)
+            # Flux 路径以 UNet 侧 latent 量纲为准：优先使用 flux_target_scale_factor
+            # 这会影响 latent 数据集 (is_latent=True) 分支的缩放，必须与 encode_for_unet/decode_from_unet 对齐。
+            self.scale_factor = advanced.get(
+                "flux_target_scale_factor",
+                flux_params.get("scale_factor", model_params.scale_factor),
+            )
         else:
             self.scale_factor = advanced.get("scale_factor", model_params.scale_factor)
 
@@ -128,9 +132,10 @@ class StableDiffusionModel(pl.LightningModule):
                 self.latents_mean = lm.view(1, self.latent_channels, 1, 1).to(self.target_device)
                 self.latents_std = ls.view(1, self.latent_channels, 1, 1).to(self.target_device)
 
-        vae.eval()
-        vae.train = disabled_train
-        vae.requires_grad_(False)
+        if vae is not None:
+            vae.eval()
+            vae.train = disabled_train
+            vae.requires_grad_(False)
         return vae, unet, conditioner
 
     def init_model(self):
@@ -145,15 +150,18 @@ class StableDiffusionModel(pl.LightningModule):
                 ds_rescale = self.config.dataset.get("rescale_latents", None)
             except Exception:
                 ds_rescale = None
+            # Flux VAE latents（16c）在 UNet 侧已经是目标量纲；latent cache 路径应直接使用。
+            # 因此强制 rescale_latents=False，避免 LatentStore 对 H5 的 scale 标记做除法。
             if ds_rescale not in (False, None):
                 logger.warning(
-                    "use_flux_vae 已启用，检测到 dataset.rescale_latents=%s，将其置为 False 以避免二次缩放",
+                    "use_flux_vae 已启用，检测到 dataset.rescale_latents=%s，将其置为 False 以避免错误缩放",
                     ds_rescale,
                 )
-                try:
-                    self.config.dataset.rescale_latents = False
-                except Exception:
-                    pass
+            try:
+                self.config.dataset.rescale_latents = False
+            except Exception:
+                pass
+
             # 强制对齐 Flux latent 量纲，避免沿用旧的 SDXL 数据预处理配置
             try:
                 if getattr(self.config.dataset, "scale_factor", None) not in (flux_scale, None):
@@ -586,7 +594,14 @@ class StableDiffusionModel(pl.LightningModule):
                 for key in vae_weight.keys():
                     weight_to_save[f"first_stage_model.{key}"] = vae_weight[key]
         elif hasattr(self, "_deepspeed_engine"):
-            from deepspeed import zero
+            try:
+                import importlib
+                zero = importlib.import_module("deepspeed").zero
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "Detected DeepSpeed engine but 'deepspeed' is not installed. "
+                    "Install DeepSpeed or switch strategy away from DeepSpeed."
+                ) from exc
             weight_to_save = {}
             with zero.GatheredParameters(self.model.parameters()):
                 unet_weight = self.model.state_dict()
