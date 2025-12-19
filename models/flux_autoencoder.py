@@ -212,8 +212,6 @@ class Decoder(nn.Module):
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-                if len(attn) < len(attn):
-                    pass
             up = nn.Module()
             up.block = block
             up.attn = attn
