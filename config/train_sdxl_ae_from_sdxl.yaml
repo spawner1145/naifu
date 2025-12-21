@@ -1,41 +1,32 @@
+# python trainer.py --config config/train_sdxl_ae_from_sdxl.yaml
 name: sdxl-ae-from-sdxl
-# 用“普通 SDXL checkpoint(4c latent)”作为初始化，然后切到 Flux VAE(16c latent) 训练。
-# 关键点：必须开启 advanced.use_flux_vae，并提供 flux_vae_path。
-# 建议直接用图片数据训练（img_path 指向图片目录），不要用 SDXL VAE 预编码的 4 通道 latents。
-
 target: modules.train_sdxl.setup
 
 trainer:
-  # 你的 SDXL base 权重（safetensors/ckpt 都可）
-  model_path: "D:/code/naifu1/sd_xl_base_1.0_0.9vae.safetensors"
+  model_path: "/root/autodl-tmp/naifu/checkpoint_sdxl_ae/checkpoint-e1_s1615.safetensors"
 
-  # 单卡 H20：建议先从 batch_size=4 起步；如 OOM 再把 batch_size 降到 2/1，并增大 accumulate。
-  batch_size: 4
+  batch_size: 10
   accumulate_grad_batches: 1
 
   seed: 1138
-  wandb_id: ""
-  # 如果你安装了 xformers，建议开启（更省显存更快）；没装就改回 false。
-  use_xformers: true
+  wandb_id: "1145"
+  use_xformers: false
   gradient_clip_val: 0.0
 
   # Debug：打印参数梯度与 step 后权重变化，确认确实在更新
   debug_param_update: true
-  debug_param_update_every: 50
+  debug_param_update_every: 5
 
   save_format: safetensors
   checkpoint_dir: checkpoint_sdxl_ae
   checkpoint_freq: 1
   checkpoint_steps: -1
   save_weights_only: true
-  max_epochs: 10
+  max_epochs: 60
   max_steps: -1
 
 advanced:
-  # VAE 编码分批，-1 表示跟 batch_size 一致；显存紧张可以改小（例如 1）
   vae_encode_batch_size: -1
-
-  # 默认不训练文本编码器，更省显存也更稳定
   train_text_encoder_1: false
   train_text_encoder_2: false
   text_encoder_1_lr: 3e-6
@@ -43,8 +34,6 @@ advanced:
 
   offset_noise: true
   offset_noise_val: 0.0375
-
-  # 常用的稳定训练选项
   min_snr: true
   min_snr_val: 5
   timestep_start: 0
@@ -54,22 +43,11 @@ advanced:
   zero_terminal_snr: false
   do_edm_style_training: false
 
-  # ===== sdxl_ae 关键开关（换 VAE + 换 UNet 通道） =====
   use_flux_vae: true
-
-  # 你的 Flux VAE 权重（例如仓库根目录的 ae.safetensors）
-  flux_vae_path: "D:/code/naifu1/ae.safetensors"
-
-  # 保存 checkpoint 时是否把 Flux VAE 一起打包进输出权重：
-  # - true: 单文件自包含，更方便搬运
-  # - false: 文件更小，但推理/继续训练需要同时提供 flux_vae_path
+  flux_vae_path: "/root/autodl-tmp/Pad Flux EQ v2 B1.safetensors"
   save_flux_vae: false
-
-  # UNet 侧 latent 的目标量纲（训练/latent 数据集缩放都要和它对齐）
-  # 通常保持和 Flux VAE 默认一致即可
   flux_target_scale_factor: 0.3611
 
-  # Flux VAE 结构参数（一般不用改；z_channels=16 必须和 UNet 通道一致）
   flux_vae_params:
     resolution: 256
     in_channels: 3
@@ -84,45 +62,31 @@ advanced:
 lightning:
   accelerator: gpu
   devices: 1
-  # H20 支持 BF16，通常比 FP16 更稳。
-  precision: bf16-mixed
+  precision: 32
 
 dataset:
   name: data.bucket.AspectRatioDataset
+  img_path: "/root/autodl-tmp/train/high/extracted_zip/1_img"
 
-  # 直接指向图片目录（推荐）
-  img_path: "D:/data/my_images"
-
-  # 1024 训练
   target_area: 1_048_576
   min_size: 512
   max_size: 2048
-
-  # H20 显存充裕时可用更长文本；如你数据 caption 很短，设 75 也可以。
   max_token_length: 225
 
 optimizer:
-  # 需要先安装对应库（你已验证可用路径）：pytorch_optimizer.Adan
-  name: pytorch_optimizer.Adan
-  params:
-    # Adan 通常可以用稍大的 lr，但你这里从 4c->16c 迁移，建议先保守。
-    lr: 6e-6
-    betas: [0.98, 0.92, 0.99]
-    eps: 1e-8
+  name: torch.optim.AdamW
+  params: # 1.3e-5
+    lr: 5e-5
     weight_decay: 1e-2
 
 scheduler:
-  # 推荐：余弦退火（lr 会随训练变化，避免 constant 看起来“一直不变”）
-  # 这里的 step 输入是“epoch + batch/len(dataloader)”，所以用按 epoch 的 CosineAnnealingLR 很匹配。
-  name: torch.optim.lr_scheduler.CosineAnnealingLR
+  name: transformers.get_constant_schedule_with_warmup
   params:
-    # 建议与 trainer.max_epochs 保持一致；你改 max_epochs 时记得同步改这里。
-    T_max: 10
-    eta_min: 1e-6
+    num_warmup_steps: 0
     last_epoch: -1
 
 sampling:
-  enabled: false
+  enabled: true
   use_wandb: true
   seed: 1234
   height: 1024
@@ -131,4 +95,4 @@ sampling:
   every_n_epochs: 1
   save_dir: samples
   prompts:
-    - "best quality, a photo of a cat"
+    - "best quality, 1girl"
